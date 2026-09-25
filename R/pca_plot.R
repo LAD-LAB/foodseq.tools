@@ -1,3 +1,107 @@
+# Shared by pca_plot() (fits+plots a fresh PCA) and project_pca() (projects
+# new data into an EXISTING PCA's fixed space) -- both end up needing the
+# exact same thing: given a fitted PCA's rotation/sdev, a base ggplot
+# (points already drawn), and a phyloseq object to pull taxon labels from,
+# draw the top-nTaxa loading arrows and their quadrant-aware text labels.
+# Pulled out of pca_plot() as a pure refactor (verified byte-identical
+# output before/after) -- project_pca() never re-fits anything, so it
+# always passes through the REFERENCE pca's rotation/sdev/labels here,
+# never its own; the arrows/labels are the same fixed reference geometry
+# either way.
+.pca_biplot_layer <- function(base_plot, rotation, sdev, ps_labels,
+                              xPC, yPC, nTaxa, bplab, colorName) {
+  if (!is.null(bplab)) {
+    # Relocate bplab to the end of tax table so it will be used for labeling
+    phyloseq::tax_table(ps_labels) <- ps_labels@tax_table %>%
+      data.frame() %>%
+      dplyr::relocate(.data[[bplab]], .after = dplyr::everything()) %>%
+      as.matrix() %>%
+      phyloseq::tax_table()
+  }
+
+  # Calculate loadings
+  V <- rotation             # Eigenvectors
+  L <- diag(sdev)           # Diagonal matrix with square roots of eigenvalues
+  loadings <- V %*% L
+  colnames(loadings) <- colnames(V)  # Assign column names to loadings
+
+  # Get loadings for specified PCs and format for plotting
+  loadings.xy <- data.frame(loadings[, c(paste0('PC', xPC), paste0('PC', yPC))]) %>%
+    dplyr::rename(PCx = paste0('PC', xPC), PCy = paste0('PC', yPC)) %>%
+    dplyr::mutate(variable = row.names(loadings),
+           length = sqrt(PCx^2 + PCy^2),
+           ang = atan2(PCy, PCx) * (180 / pi))
+
+  loadings.plot <- dplyr::top_n(loadings.xy, nTaxa, wt = length)
+
+  # Adjust angles to keep labels upright
+  loadings.plot <- loadings.plot %>%
+    dplyr::mutate(adj_ang = ifelse(ang < -90, ang + 180,
+                            ifelse(ang > 90, ang - 180, ang)))
+
+  # Rename loadings with lowest taxonomic level
+  loadings.taxtab <- phyloseq::tax_table(ps_labels)[row.names(loadings.plot)] %>%
+    data.frame()
+  loadings.taxtab <- loadings.taxtab[cbind(1:nrow(loadings.taxtab), max.col(!is.na(loadings.taxtab), ties.method = 'last'))] %>%
+    data.frame()
+  colnames(loadings.taxtab) <- c("name")
+  loadings.taxtab$asv <- phyloseq::tax_table(ps_labels)[row.names(loadings.plot)] %>%
+    data.frame() %>%
+    rownames()
+
+  loadings.plot <- loadings.taxtab %>%
+    dplyr::select(asv, name) %>%
+    dplyr::right_join(loadings.plot, by = c('asv' = 'variable'))
+
+  # Determine the quadrant of each label
+  q1 <- dplyr::filter(loadings.plot, PCx > 0 & PCy > 0)
+  q2 <- dplyr::filter(loadings.plot, PCx < 0 & PCy > 0)
+  q3 <- dplyr::filter(loadings.plot, PCx < 0 & PCy < 0)
+  q4 <- dplyr::filter(loadings.plot, PCx > 0 & PCy < 0)
+
+  pca.biplot <-
+    base_plot +
+    ggplot2::geom_segment(data = loadings.plot,
+                 ggplot2::aes(x = 0, y = 0,
+                     xend = PCx, yend = PCy),
+                 color = 'black',
+                 arrow = ggplot2::arrow(angle = 15,
+                               length = ggplot2::unit(0.1, 'inches'))) +
+    ggplot2::labs(color = colorName)
+
+  # Add geom_text for each quadrant with adjusted angle and justification
+  if (nrow(q1) != 0) {
+    pca.biplot <- pca.biplot +
+      ggplot2::geom_text(data = q1, ggplot2::aes(x = PCx, y = PCy, hjust = 0, vjust = 0, angle = adj_ang,
+                               label = name,
+                               fontface = 'bold'),
+                color = 'black', show.legend = FALSE)
+  }
+  if (nrow(q2) != 0) {
+    pca.biplot <- pca.biplot +
+      ggplot2::geom_text(data = q2, ggplot2::aes(x = PCx, y = PCy, hjust = 1, vjust = 0, angle = adj_ang,
+                               label = name,
+                               fontface = 'bold'),
+                color = 'black', show.legend = FALSE)
+  }
+  if (nrow(q3) != 0) {
+    pca.biplot <- pca.biplot +
+      ggplot2::geom_text(data = q3, ggplot2::aes(x = PCx, y = PCy, hjust = 1, vjust = 1, angle = adj_ang,
+                               label = name,
+                               fontface = 'bold'),
+                color = 'black', show.legend = FALSE)
+  }
+  if (nrow(q4) != 0) {
+    pca.biplot <- pca.biplot +
+      ggplot2::geom_text(data = q4, ggplot2::aes(x = PCx, y = PCy, hjust = 0, vjust = 1, angle = adj_ang,
+                               label = name,
+                               fontface = 'bold'),
+                color = 'black', show.legend = FALSE)
+  }
+
+  list(pca.biplot = pca.biplot, loadings = loadings)
+}
+
 #' @title PCA plot and biplot
 #'
 #' @description This function runs a Principal Component Analysis.
@@ -49,15 +153,6 @@ pca_plot <- function(ps, # clr transformed and filtered data
     phyloseq::sample_data(ps) <- ps@sam_data %>%
       data.frame() %>%
       dplyr::rename(name.x = name)
-  }
-
-  if (!is.null(bplab)) {
-    # Relocate bplab to the end of tax table so it will be used for labeling
-    phyloseq::tax_table(ps) <- ps@tax_table %>%
-      data.frame() %>%
-      dplyr::relocate(.data[[bplab]], .after = dplyr::everything()) %>%
-      as.matrix() %>%
-      phyloseq::tax_table()
   }
 
   samdf <- data.frame(ps@sam_data) %>%
@@ -153,89 +248,12 @@ pca_plot <- function(ps, # clr transformed and filtered data
     }
   }
 
-  # Calculate loadings
-  V <- pca$rotation # Eigenvectors
-  L <- diag(pca$sdev) # Diagonal matrix with square roots of eigenvalues
-  loadings <- V %*% L
-  colnames(loadings) <- colnames(V)  # Assign column names to loadings
-
-  # Get loadings for specified PCs and format for plotting
-  loadings.xy <- data.frame(loadings[, c(paste0('PC', xPC), paste0('PC', yPC))]) %>%
-    dplyr::rename(PCx = paste0('PC', xPC), PCy = paste0('PC', yPC)) %>%
-    dplyr::mutate(variable = row.names(loadings),
-           length = sqrt(PCx^2 + PCy^2),
-           ang = atan2(PCy, PCx) * (180 / pi))
-
-  loadings.plot <- dplyr::top_n(loadings.xy, nTaxa, wt = length)
-
-  # Adjust angles to keep labels upright
-  loadings.plot <- loadings.plot %>%
-    dplyr::mutate(adj_ang = ifelse(ang < -90, ang + 180,
-                            ifelse(ang > 90, ang - 180, ang)))
-
-  # Rename loadings with lowest taxonomic level
-  loadings.taxtab <- phyloseq::tax_table(ps)[row.names(loadings.plot)] %>%
-    data.frame()
-  loadings.taxtab <- loadings.taxtab[cbind(1:nrow(loadings.taxtab), max.col(!is.na(loadings.taxtab), ties.method = 'last'))] %>%
-    data.frame()
-  colnames(loadings.taxtab) <- c("name")
-  loadings.taxtab$asv <- phyloseq::tax_table(ps)[row.names(loadings.plot)] %>%
-    data.frame() %>%
-    rownames()
-
-  loadings.plot <- loadings.taxtab %>%
-    dplyr::select(asv, name) %>%
-    dplyr::right_join(loadings.plot, by = c('asv' = 'variable'))
-
-  # Determine the quadrant of each label
-  q1 <- dplyr::filter(loadings.plot, PCx > 0 & PCy > 0)
-  q2 <- dplyr::filter(loadings.plot, PCx < 0 & PCy > 0)
-  q3 <- dplyr::filter(loadings.plot, PCx < 0 & PCy < 0)
-  q4 <- dplyr::filter(loadings.plot, PCx > 0 & PCy < 0)
-
-  pca.biplot <-
-    pca.plot +
-    ggplot2::geom_segment(data = loadings.plot,
-                 ggplot2::aes(x = 0, y = 0,
-                     xend = PCx, yend = PCy),
-                 color = 'black',
-                 arrow = ggplot2::arrow(angle = 15,
-                               length = ggplot2::unit(0.1, 'inches'))) +
-    ggplot2::labs(color = colorName)
-
-  # Add geom_text for each quadrant with adjusted angle and justification
-  if (nrow(q1) != 0) {
-    pca.biplot <- pca.biplot +
-      ggplot2::geom_text(data = q1, ggplot2::aes(x = PCx, y = PCy, hjust = 0, vjust = 0, angle = adj_ang,
-                               label = name,
-                               fontface = 'bold'),
-                color = 'black', show.legend = FALSE)
-  }
-  if (nrow(q2) != 0) {
-    pca.biplot <- pca.biplot +
-      ggplot2::geom_text(data = q2, ggplot2::aes(x = PCx, y = PCy, hjust = 1, vjust = 0, angle = adj_ang,
-                               label = name,
-                               fontface = 'bold'),
-                color = 'black', show.legend = FALSE)
-  }
-  if (nrow(q3) != 0) {
-    pca.biplot <- pca.biplot +
-      ggplot2::geom_text(data = q3, ggplot2::aes(x = PCx, y = PCy, hjust = 1, vjust = 1, angle = adj_ang,
-                               label = name,
-                               fontface = 'bold'),
-                color = 'black', show.legend = FALSE)
-  }
-  if (nrow(q4) != 0) {
-    pca.biplot <- pca.biplot +
-      ggplot2::geom_text(data = q4, ggplot2::aes(x = PCx, y = PCy, hjust = 0, vjust = 1, angle = adj_ang,
-                               label = name,
-                               fontface = 'bold'),
-                color = 'black', show.legend = FALSE)
-  }
+  biplot_out <- .pca_biplot_layer(pca.plot, pca$rotation, pca$sdev, ps,
+                                  xPC, yPC, nTaxa, bplab, colorName)
 
   return(list(pca.df = pca.df,
-              pca.biplot = pca.biplot,
-              loadings = loadings,
+              pca.biplot = biplot_out$pca.biplot,
+              loadings = biplot_out$loadings,
               pca.output = pca,
               scree.table = scree.table,
               scree.plot = scree.plot))
