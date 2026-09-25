@@ -10,45 +10,98 @@ plan_harmonization(
   min_overlap = 0.01,
   flag_common_name = FALSE,
   verbose = TRUE,
-  tax_rank_cols = NULL
+  tax_rank_cols = NULL,
+  save_path = NULL,
+  prior_decisions = NULL
 )
 }
 \arguments{
-\item{ps_list}{Named list of phyloseq objects, or a single phyloseq.}
+\item{ps_list}{Named list of phyloseq objects, or a single phyloseq
+object.}
 
-\item{source_names}{Optional batch labels (length must equal ps_list).}
+\item{source_names}{Optional batch labels; length must equal
+\code{ps_list}. Defaults to \code{names(ps_list)} or sequential
+integers.}
 
-\item{min_overlap}{S5 overlap threshold (default 0.01).}
+\item{min_overlap}{Numeric; S5 species-set overlap threshold. Default
+\code{0.01}.}
 
-\item{flag_common_name}{Flag S5 pairs that share a common name (default FALSE).}
+\item{flag_common_name}{If \code{TRUE}, also flag S5 pairs that share a
+common name. Default \code{FALSE}.}
 
-\item{verbose}{Print scenario summary (default TRUE).}
+\item{verbose}{If \code{TRUE}, print a scenario summary. Default
+\code{TRUE}.}
 
-\item{tax_rank_cols}{Rank column names; inferred from phyloseq if NULL.}
+\item{tax_rank_cols}{Character vector of formal taxonomic rank column
+names; inferred from the phyloseq tax table when \code{NULL}.}
+
+\item{save_path}{Optional file path to write \code{$decisions} to as a
+CSV immediately (\code{write.csv(..., row.names = FALSE)}), for a
+ready-to-hand-edit file on disk without a separate step. If \code{NULL}
+(default), nothing is written -- \code{$decisions} is only returned
+in-memory.}
+
+\item{prior_decisions}{Optional decisions from an earlier
+\code{plan_harmonization()} round on a related (not necessarily
+identical) set of objects -- the list it returned, its
+\code{$decisions} data frame, or a path to one saved as a CSV. Reduces
+review work and keeps a continuous project's decisions consistent:
+a pair identical to an already-resolved \code{prior_decisions} row is
+carried forward automatically (never re-shown for review); a
+genuinely new pair that touches an ASV \code{prior_decisions} already
+resolved is flagged with \code{touches_prior_decision = TRUE} and
+surfaced as its own skippable category in the interactive review --
+reviewing one only ever decides whether the \emph{new} ASV joins that
+already-established group or stays distinct, never anything about the
+existing group itself (a note in the review UI recommends a full
+re-run for that); skipping the category defaults every such pair to
+\code{"keep_distinct"} rather than leaving it unresolved. If
+\code{NULL} (default), every pair is reviewed fresh, as before.}
 }
 \value{
-A \code{harmonization_plan} object (list) with elements
-\code{ps_merged}, \code{flagged}, \code{tax_rank_cols}, \code{manual}
-(the reviewer's decisions: \code{name_updates}, \code{common_name_updates},
-\code{keep_asvs}, \code{s1_skip_keys}, \code{rationale}), \code{asv_info},
-and \code{compare_result}. Pass this object directly as the \code{ps}
-argument of \code{apply_asv_corrections()} in apply_asv_corrections.R.
+A \code{harmonization_plan} object (a list with class
+\code{"harmonization_plan"}) with two elements: \code{decisions} (one
+row per flagged pair -- including \code{source_i}/\code{source_j}
+source-batch columns; \code{touches_prior_decision}, set when
+\code{prior_decisions} was supplied and this pair touches an ASV it
+already resolved; and two manifest columns, \code{plan_samples}
+and \code{plan_taxa_hashes}, recording \code{ps_list}'s full original
+sample names and a compact hash of every original ASV, used by
+\code{\link{apply_harmonization}}'s sample/taxa checkpoints -- ready
+to hand-edit and pass to \code{\link{apply_harmonization}}) and
+\code{summary} (pair counts by scenario). When \code{prior_decisions}
+is supplied, \code{decisions} is always the full cumulative table
+(everything from \code{prior_decisions} plus whatever this round
+resolved) -- ready to pass straight back in as \code{prior_decisions}
+for the next round, with no manual stitching required.
 }
 \description{
-Runs the comparison (compare_asvs()) and interactive review
-(resolve_conflicts_interactive()) steps, then returns a
-\code{harmonization_plan} object. Pass the plan to
-\code{apply_asv_corrections()} (defined in the companion file
-apply_asv_corrections.R) to apply the decisions and obtain the harmonized
-phyloseq object — keeping the Shiny session and the corrections in
-separate call frames avoids DT/htmlwidgets GC finalizer interference.
+Runs \code{compare_asvs()} to detect cross-batch (and
+within-object) ASV redundancy, then \code{resolve_conflicts_interactive()}
+for interactive review, and packages the result as a
+\code{harmonization_plan} object: a per-pair \code{decisions} table
+(one row per flagged pair, with \code{decision}/\code{chosen_name}/
+\code{rationale} columns -- pre-filled for algorithmic S1 auto-merges
+and anything already decided interactively, blank otherwise) plus a
+\code{summary} table of pair counts by scenario. Pass the plan (or its
+\code{$decisions} table directly, or a path to it saved as a CSV) to
+\code{\link{apply_harmonization}} to apply the decisions.
+
+The returned plan intentionally does \strong{not} carry a phyloseq object --
+\code{\link{apply_harmonization}} takes the same \code{ps} (or the
+merged result of your own \code{ps_list}) directly, so the plan itself
+stays a small, self-contained, easily-saved (e.g. \code{write.csv()} on
+\code{$decisions}) artifact.
 }
 \examples{
 \dontrun{
-  source("plan_harmonization.R")
-  source("apply_asv_corrections.R")
-  plan   <- plan_harmonization(ps_list, source_names = names(ps_list))
-  result <- apply_asv_corrections(plan)
-  # result$ps_harmonized, result$decisions, result$asv_summary, etc.
+plan   <- plan_harmonization(ps_list, source_names = names(ps_list))
+# review/edit plan$decisions (in R, or via write.csv() + a spreadsheet editor)
+result <- apply_harmonization(ps, plan)
+# result$ps, result$asv_outcomes, result$unresolved, etc.
+
+# Later, a new batch arrives -- reuse plan's decisions, only review what's new:
+plan2 <- plan_harmonization(ps_list2, prior_decisions = plan)
 }
+
 }
