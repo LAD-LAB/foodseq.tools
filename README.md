@@ -90,7 +90,6 @@ devtools::install_github("LAD-LAB/foodseq.tools")
 
 | Function | Description |
 |---|---|
-| `clr_transform()` | Centered log-ratio (CLR) transform of a phyloseq count table. |
 | `pca_plot()` | Fits a PCA and returns a scree plot, biplot, and loadings. |
 | `project_pca()` | Projects new, already-harmonized data into an existing PCA's fixed space. |
 | `bstick_pc()` | Broken-stick method for choosing how many PCs to retain. |
