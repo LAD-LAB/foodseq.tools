@@ -25,13 +25,20 @@
 assign_common_names <- function(physeq, common_names_csv,
                                 report_conflicts = TRUE,
                                 report_all_conflicts = TRUE,
-                                concatenate_conflicts = TRUE) {
+                                concatenate_conflicts = TRUE,
+                                match_by = "sequence") {
+  if (!is.character(match_by) || length(match_by) != 1L || is.na(match_by) ||
+        !match_by %in% c("sequence", "taxonomy", "sequence_then_taxonomy")) {
+    stop("match_by must be one of: sequence, taxonomy, sequence_then_taxonomy.")
+  }
   # Read the common names CSV
   common_names <- utils::read.csv(common_names_csv, stringsAsFactors = FALSE)
 
   # Build genus lookup from ALL rows in CSV (only non-NA values)
   genus_key <- NULL
-  if ("genus" %in% colnames(common_names) && "genus_conventional_name" %in% colnames(common_names)) {
+  if (match_by != "taxonomy" &&
+        "genus" %in% colnames(common_names) &&
+        "genus_conventional_name" %in% colnames(common_names)) {
     valid_genus <- !is.na(common_names$genus) &
       !is.na(common_names$genus_conventional_name) &
       common_names$genus != "" &
@@ -289,9 +296,16 @@ assign_common_names <- function(physeq, common_names_csv,
 
   # --- Main matching loop ---
 
-  for (i in seq_along(asv_seqs)) {
+  sequence_matched <- rep(FALSE, nrow(tax_tab))
+  sequence_indices <- if (match_by == "taxonomy") {
+    integer(0)
+  } else {
+    seq_along(asv_seqs)
+  }
+  for (i in sequence_indices) {
     query_seq <- asv_seqs[i]
     matches <- grepl(query_seq, common_names$asv, fixed = TRUE)
+    sequence_matched[i] <- any(matches)
 
     if (sum(matches) == 0) {
       next
@@ -412,7 +426,7 @@ assign_common_names <- function(physeq, common_names_csv,
   # donors for that species agree on the same common name (unambiguous).
   all_cols <- colnames(tax_tab)
   species_col_idx <- which(tolower(all_cols) == "species")
-  if (length(species_col_idx) == 1) {
+  if (match_by != "taxonomy" && length(species_col_idx) == 1) {
     sp_col <- all_cols[species_col_idx]
     subsp_cols <- all_cols[tolower(all_cols) %in% c("subspecies", "varietas", "forma")]
     group_cols <- c(sp_col, subsp_cols)
@@ -455,6 +469,59 @@ assign_common_names <- function(physeq, common_names_csv,
           "Skipped %d ASVs with ambiguous species-level common names (multiple different names for same species).",
           skipped_ambiguous
         ))
+      }
+    }
+  }
+
+  if (match_by != "sequence") {
+    normalize_taxon <- function(value) {
+      if (is.na(value) || !nzchar(trimws(value))) return(NA_character_)
+      taxa <- trimws(strsplit(value, ";", fixed = TRUE)[[1]])
+      paste(sort(unique(taxa)), collapse = "; ")
+    }
+
+    reference_taxa <- vapply(common_names$taxon, normalize_taxon, character(1))
+    taxonomy_lookup <- split(seq_len(nrow(common_names)), reference_taxa)
+    query_taxa <- rep(NA_character_, nrow(tax_tab))
+    ranks <- c("forma", "varietas", "subspecies", "species", "genus",
+               "family", "order", "class", "phylum", "kingdom", "superkingdom")
+    rank_columns <- match(ranks, tolower(all_cols))
+    for (column in rank_columns[!is.na(rank_columns)]) {
+      values <- vapply(tax_tab[[column]], normalize_taxon, character(1))
+      use_rank <- is.na(query_taxa) & !is.na(values)
+      query_taxa[use_rank] <- values[use_rank]
+    }
+
+    # Match the complete, most-specific assignment; never broaden a
+    # subspecific or compound reference label into a species-wide name.
+    eligible <- !is.na(query_taxa)
+    if (match_by == "sequence_then_taxonomy") {
+      eligible <- eligible & is.na(tax_tab$common_name) & !sequence_matched
+    }
+    for (i in which(eligible)) {
+      matched_indices <- taxonomy_lookup[[query_taxa[i]]]
+      if (is.null(matched_indices)) next
+      matched_names <- common_names$conventional_name[matched_indices]
+      valid_names <- !is.na(matched_names) & nzchar(trimws(matched_names))
+      unique_names <- unique(matched_names[valid_names])
+      tax_tab$taxa[i] <- query_taxa[i]
+      if (length(unique_names) == 1L) {
+        tax_tab$common_name[i] <- unique_names
+      } else if (length(unique_names) > 1L) {
+        all_conflicts[[length(all_conflicts) + 1L]] <- data.frame(
+          asv_index = i,
+          asv_seq = substr(asv_seqs[i], 1, 50),
+          num_matches = length(matched_indices),
+          resolution_method = "unresolved",
+          assigned_common_name = NA_character_,
+          assigned_taxa = query_taxa[i],
+          all_conventional_names = paste(unique_names, collapse = " | "),
+          all_taxa = paste(
+            common_names$taxon[matched_indices], collapse = " || "
+          ),
+          genera = paste(extract_genera(query_taxa[i]), collapse = ", "),
+          stringsAsFactors = FALSE
+        )
       }
     }
   }
