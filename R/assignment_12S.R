@@ -10,8 +10,8 @@
 # See the LICENSE file in this repository for full details.
 
 assignTaxonomy_mod <- function (seqs, refFasta, minBoot = 50, tryRC = FALSE, outputBootstraps = FALSE,
-                                taxLevels = c("Kingdom", "Phylum", "Class", "Order", "Family",
-                                              "Genus", "Species"), multithread = FALSE, verbose = FALSE)
+                                taxLevels = NULL,
+                                multithread = FALSE, verbose = FALSE)
 {
   seqs <- dada2::getSequences(seqs)
   refsr <- ShortRead::readFasta(refFasta)
@@ -29,6 +29,20 @@ assignTaxonomy_mod <- function (seqs, refFasta, minBoot = 50, tryRC = FALSE, out
   }
   tax.depth <- sapply(strsplit(tax, ";"), length)
   td <- max(tax.depth)
+  if (is.null(taxLevels)) {
+    rank_order <- c(
+      "superkingdom", "phylum", "class", "order", "family",
+      "genus", "species", "subspecies", "varietas", "forma"
+    )
+    if (td > length(rank_order)) {
+      stop("Reference exceeds the canonical rank order; supply taxLevels.")
+    }
+    taxLevels <- rank_order[seq_len(td)]
+  } else if (!is.character(taxLevels) || length(taxLevels) != td ||
+               anyNA(taxLevels) || any(!nzchar(trimws(taxLevels))) ||
+               anyDuplicated(taxLevels)) {
+    stop("taxLevels must contain one unique, nonempty name per reference rank.")
+  }
   for (i in seq(length(tax))) {
     if (tax.depth[[i]] < td) {
       for (j in seq(td - tax.depth[[i]])) {
@@ -75,7 +89,7 @@ assignTaxonomy_mod <- function (seqs, refFasta, minBoot = 50, tryRC = FALSE, out
     }
   }
   rownames(tax.out) <- seqs
-  colnames(tax.out) <- taxLevels[1:ncol(tax.out)]
+  colnames(tax.out) <- taxLevels
   tax.out[tax.out == "_DADA2_UNSPECIFIED"] <- NA_character_
 
   ## --- Added NA-token cleanup (only new code) ---
@@ -90,7 +104,7 @@ assignTaxonomy_mod <- function (seqs, refFasta, minBoot = 50, tryRC = FALSE, out
   if (outputBootstraps) {
     boots.out <- matrix(boots, nrow = length(seqs), ncol = td)
     rownames(boots.out) <- seqs
-    colnames(boots.out) <- taxLevels[1:ncol(boots.out)]
+    colnames(boots.out) <- taxLevels
     list(tax = tax.out, boot = boots.out)
   }
   else {
@@ -107,6 +121,9 @@ assignTaxonomy_mod <- function (seqs, refFasta, minBoot = 50, tryRC = FALSE, out
 #' @param out_dir The path to the output directory
 #' @param tryRC TRUE or FALSE; whether to check reverse complements
 #' @param verbose TRUE or FALSE; whether to output messages
+#' @param taxLevels Optional ordered rank names. NULL uses the canonical order
+#'   from superkingdom through forma, limited to the detected reference depth.
+#'   Explicit names must be unique, nonempty, and match the reference depth.
 #' @return A taxonomy table, formatted as a character matrix; a list of statistics regarding assignment,
 #' and a CSV of NAs saved to the output directory.
 #' @export
@@ -114,20 +131,18 @@ assignment_12S <- function(qiime_asvtab = qiime.asvtab.12S,
                                 ref_fasta = ref.12S,
                                 out_dir = qiime.dir.12S,
                                 tryRC = TRUE,
-                                verbose = TRUE) {
-
-  taxLevels <- c("kingdom","phylum","class","order",
-                "family","genus","species","subspecies")
+                                verbose = TRUE,
+                                taxLevels = NULL) {
 
   # 1) Taxonomy
   taxtab <- assignTaxonomy_mod(qiime_asvtab,
                                   refFasta = ref_fasta,
                                   tryRC = tryRC,
                                   taxLevels = taxLevels)
+  taxLevels <- colnames(taxtab)
 
-  # Coerce to data.frame and ensure rank columns exist (in case some are missing)
+  # Preserve the rank columns detected by the classifier.
   taxonomy <- as.data.frame(taxtab, stringsAsFactors = FALSE)
-  for (r in taxLevels) if (!r %in% names(taxonomy)) taxonomy[[r]] <- NA_character_
 
   # Ensure ASV IDs are available as rownames (DADA2 uses rownames = ASV IDs)
   asv_ids <- rownames(taxonomy)
@@ -135,7 +150,7 @@ assignment_12S <- function(qiime_asvtab = qiime.asvtab.12S,
   taxonomy$asv <- asv_ids
 
   # 2) Compute metrics
-  unassigned_asvs <- taxonomy$asv[is.na(taxonomy$kingdom)]
+  unassigned_asvs <- taxonomy$asv[is.na(taxonomy[[taxLevels[[1L]]]])]
 
   n_asvs <- ncol(qiime_asvtab)
   pct_asvs_assigned <- 100 * (1 - length(unassigned_asvs) / n_asvs)
@@ -150,9 +165,11 @@ assignment_12S <- function(qiime_asvtab = qiime.asvtab.12S,
   pct_reads_assigned   <- 100 - pct_reads_unassigned
 
   # 3) Clean up subspecific ranks BEFORE condenseTaxa
-  # Subspecies should only be kept if there's no ambiguity
-  # If multiple matches exist for an ASV, subspecies is NA'd out if they disagree
-  subspecific_ranks <- c("subspecies")
+  # Apply the same ambiguity rule to every rank below species.
+  species_position <- match("species", tolower(taxLevels))
+  subspecific_ranks <- taxLevels[
+    which(seq_along(taxLevels) > species_position)
+  ]
   taxonomy_clean <- taxonomy %>%
     dplyr::group_by(asv) %>%
     dplyr::mutate(dplyr::across(
@@ -225,9 +242,15 @@ assignment_12S <- function(qiime_asvtab = qiime.asvtab.12S,
   storage.mode(assignments_mat) <- "character"
 
   # Which ASVs have NA at both 'order' and 'family'?
-  asvs_na <- rownames(assignments_mat)[
-    is.na(assignments_mat[, "order"]) & is.na(assignments_mat[, "family"])
-  ]
+  report_columns <- match(c("order", "family"), tolower(taxLevels))
+  asvs_na <- character(0)
+  if (!anyNA(report_columns)) {
+    asvs_na <- rownames(assignments_mat)[
+      rowSums(!is.na(assignments_mat[, report_columns, drop = FALSE])) == 0L
+    ]
+  } else if (verbose) {
+    message("Skipping order/family NA report: reference lacks these ranks.")
+  }
 
   # Build the report (samples with reads > 0, and total reads)
   if (length(asvs_na)) {
